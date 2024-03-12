@@ -53,14 +53,10 @@ struct ArgsDedup {}
 
 fn main() -> color_eyre::Result<()> {
     let subscriber = tracing_subscriber::Registry::default()
-        // any number of other subscriber layers may be added before or
-        // after the `ErrorLayer`...
         .with(tracing_subscriber::filter::LevelFilter::from_level(Level::TRACE))
         .with(ErrorLayer::default())
         .with(tracing_subscriber::fmt::layer())
         ;
-
-    // set the subscriber as the default for the application
     tracing::subscriber::set_global_default(subscriber)?;
 
     color_eyre::install()?;

@@ -1,2 +1,4 @@
 /target
 *.sqlite*
+perf.data
+perf.data.old

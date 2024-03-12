@@ -58,6 +58,12 @@ impl Node {
 enum Edge {
     Contains,
     ContainsTransitively,
+    Tombstone,
+}
+impl Edge {
+    fn is_contains(&self) -> bool { matches!(self, Edge::Contains) }
+    fn is_transitive(&self) -> bool { matches!(self, Edge::ContainsTransitively) }
+    fn is_tombstone(&self) -> bool { matches!(self, Edge::Tombstone) }
 }
 
 #[derive(Default)]
@@ -105,7 +111,7 @@ impl Deduper {
             if let &Node::File { size, .. } = &self.graph[ni] {
                 let mut neighbors = self.graph.neighbors(ni).detach();
                 while let Some(e) = neighbors.next_edge(&mut self.graph) {
-                    if matches!(self.graph[e], Edge::ContainsTransitively) {
+                    if self.graph[e].is_transitive() {
                         let (_, target) = self.graph.edge_endpoints(e).unwrap();
                         match &mut self.graph[target] {
                             Node::Dir { cumulative_size, .. } => {
@@ -155,7 +161,7 @@ impl Deduper {
                 continue;
             }
 
-            let contains_edges = self.graph.edges(node).filter(|e| matches!(e.weight(), Edge::Contains)).map(|e| e.target());
+            let contains_edges = self.graph.edges(node).filter(|e| e.weight().is_contains()).map(|e| e.target());
 
             if contains_edges.clone().count() <= 1 {
                 // nothing to merge here
@@ -169,6 +175,8 @@ impl Deduper {
                     // p1 was merged in a previous iteration
                     continue;
                 }
+
+                let mut p1_children = None;
 
                 for &p2 in &parents {
                     if p2 <= p1 {
@@ -191,8 +199,8 @@ impl Deduper {
                             continue;
                         }
                         Entry::Vacant(v) => {
-                            let p1_children = self.get_children_set(p1);
-                            let p2_children = self.get_children_set(p2);
+                            let p1_children = p1_children.get_or_insert_with(|| self.get_children_set(p1));
+                            let p2_children = &mut self.get_children_set(p2);
 
                             // TODO: fuzzy matching
                             if p1_children == p2_children {
@@ -207,13 +215,13 @@ impl Deduper {
                                     dup_cumulative_size: p1_node.dup_size() + p2_node.dup_size(),
                                 };
 
-                                let p2_incoming: Vec<_> = self.graph.edges_directed(p2, Direction::Incoming).map(|e| (e.id(), e.source(), *e.weight())).collect();
-                                let p2_outgoing: Vec<_> = self.graph.edges_directed(p2, Direction::Outgoing).map(|e| (e.id(), e.target(), *e.weight())).collect();
+                                let p2_incoming: Vec<_> = self.graph.edges_directed(p2, Direction::Incoming).filter(|e| !e.weight().is_tombstone()).map(|e| (e.id(), e.source(), *e.weight())).collect();
+                                let p2_outgoing: Vec<_> = self.graph.edges_directed(p2, Direction::Outgoing).filter(|e| !e.weight().is_tombstone()).map(|e| (e.id(), e.target(), *e.weight())).collect();
                                 for &(idx, _, _) in p2_incoming.iter().chain(&p2_outgoing) {
-                                    self.graph.remove_edge(idx);
+                                    self.graph[idx] = Edge::Tombstone;
                                 }
                                 for (_, src, w) in p2_incoming {
-                                    if matches!(w, Edge::Contains) {
+                                    if w.is_contains() {
                                         // make sure to visit src again in case this changes anything for them
                                         nodes_to_visit.push(src);
                                         progress.inc_length(1);
@@ -241,7 +249,7 @@ impl Deduper {
 
     fn get_children_set(&self, n: NodeIndex) -> FnvHashSet<NodeIndex> {
         let mut set = FnvHashSet::default();
-        for e in self.graph.edges_directed(n, Direction::Incoming).filter(|e| matches!(e.weight(), Edge::ContainsTransitively)) {
+        for e in self.graph.edges_directed(n, Direction::Incoming).filter(|e| e.weight().is_transitive()) {
             if let Node::File { .. } = &self.graph[e.source()] {
                 set.insert(e.source());
             }
@@ -282,7 +290,7 @@ fn create_transitive_edges(graph: &mut DiGraph<Node, Edge>, node: NodeIndex, par
     graph.add_edge(node, parent, Edge::ContainsTransitively);
     let mut neighbors = graph.neighbors(parent).detach();
     while let Some(e) = neighbors.next_edge(graph) {
-        if matches!(graph[e], Edge::ContainsTransitively) {
+        if graph[e].is_transitive() {
             let (_, target) = graph.edge_endpoints(e).unwrap();
             graph.add_edge(node, target, Edge::ContainsTransitively);
         }
@@ -342,7 +350,7 @@ pub fn dedup(conn: &mut Connection) -> color_eyre::Result<()> {
     for (ni, n) in deduper.graph.node_references() {
         if let Node::MergedDir { names, dedup_cumulative_size, dup_cumulative_size } = n {
             // must be contained in multiple places
-            let parent_count = deduper.graph.edges(ni).filter(|e| matches!(e.weight(), Edge::Contains)).count();
+            let parent_count = deduper.graph.edges(ni).filter(|e| e.weight().is_contains()).count();
             if parent_count > 1 {
                 heap.push(Merged {
                     ni,
@@ -357,7 +365,7 @@ pub fn dedup(conn: &mut Connection) -> color_eyre::Result<()> {
     let top_10_duplications = iter::from_fn(|| heap.pop()).take(10);
     for m in top_10_duplications {
         let mut paths = Vec::new();
-        for parent in deduper.graph.edges(m.ni).filter(|e| matches!(e.weight(), Edge::Contains)) {
+        for parent in deduper.graph.edges(m.ni).filter(|e| e.weight().is_contains()) {
             let mut path = Vec::new();
             let mut next = Some(parent.target());
             while let Some(parent) = next {
@@ -366,7 +374,7 @@ pub fn dedup(conn: &mut Connection) -> color_eyre::Result<()> {
                     _ => todo!(),
                 };
                 path.push(Path::new(dn.as_os_str()));
-                let mut next_iter = deduper.graph.edges(parent).filter(|e| matches!(e.weight(), Edge::Contains));
+                let mut next_iter = deduper.graph.edges(parent).filter(|e| e.weight().is_contains());
                 next = next_iter.next().map(|x| x.target());
                 assert!(next_iter.next().is_none());
             }
