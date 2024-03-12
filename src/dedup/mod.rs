@@ -150,6 +150,11 @@ impl Deduper {
         while let Some(node) = nodes_to_visit.pop() {
             progress.inc(1);
 
+            if matches!(self.graph[node], Node::Tombstone) {
+                // node was merged in a previous iteration
+                continue;
+            }
+
             let contains_edges = self.graph.edges(node).filter(|e| matches!(e.weight(), Edge::Contains)).map(|e| e.target());
 
             if contains_edges.clone().count() <= 1 {
@@ -337,19 +342,39 @@ pub fn dedup(conn: &mut Connection) -> color_eyre::Result<()> {
     for (ni, n) in deduper.graph.node_references() {
         if let Node::MergedDir { names, dedup_cumulative_size, dup_cumulative_size } = n {
             // must be contained in multiple places
-            heap.push(Merged {
-                ni,
-                names,
-                dedup_cumulative_size,
-                dup_cumulative_size,
-            })
+            let parent_count = deduper.graph.edges(ni).filter(|e| matches!(e.weight(), Edge::Contains)).count();
+            if parent_count > 1 {
+                heap.push(Merged {
+                    ni,
+                    names,
+                    dedup_cumulative_size,
+                    dup_cumulative_size,
+                });
+            }
         }
     }
 
     let top_10_duplications = iter::from_fn(|| heap.pop()).take(10);
     for m in top_10_duplications {
+        let mut paths = Vec::new();
+        for parent in deduper.graph.edges(m.ni).filter(|e| matches!(e.weight(), Edge::Contains)) {
+            let mut path = Vec::new();
+            let mut next = Some(parent.target());
+            while let Some(parent) = next {
+                let dn = match &deduper.graph[parent] {
+                    Node::Dir { name, .. } => name,
+                    _ => todo!(),
+                };
+                path.push(Path::new(dn.as_os_str()));
+                let mut next_iter = deduper.graph.edges(parent).filter(|e| matches!(e.weight(), Edge::Contains));
+                next = next_iter.next().map(|x| x.target());
+                assert!(next_iter.next().is_none());
+            }
+            paths.push(PathBuf::from_iter(path.iter().rev()));
+        }
         let names = m.names.iter().map(|x| x.to_string_lossy()).collect::<Vec<_>>().join(", ");
-        println!("Merging ({names}) saves {} bytes", indicatif::HumanBytes(m.saved_bytes()));
+        let paths = paths.iter().map(|x| x.to_string_lossy()).collect::<Vec<_>>().join(", ");
+        println!("Merging ({names}) saves {} (in: {paths})", indicatif::HumanBytes(m.saved_bytes()));
     }
 
     Ok(())
