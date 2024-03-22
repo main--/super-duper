@@ -37,7 +37,9 @@ impl DirIndexer<'_> {
             stmt_is_file_done: conn.prepare("SELECT COUNT(*) > 0 FROM files WHERE prefix = ? AND path = ?")?,
             stmt_insert_file: conn.prepare("INSERT INTO files(prefix, path, size, hash) VALUES(?, ?, ?, ?) ON CONFLICT DO UPDATE SET hash = excluded.hash, size = excluded.size")?,
         };
-        indexer.index_dir(&i.folder, PathBuf::new())
+        indexer.index_dir(&i.folder, PathBuf::new())?;
+        conn.execute_batch("PRAGMA optimize")?;
+        Ok(())
     }
 
     fn index_dir(&mut self, folder: &Path, rel_path: PathBuf) -> color_eyre::Result<()> {
