@@ -86,7 +86,7 @@ impl Deduper {
     #[inline(never)]
     fn import(&mut self, conn: &mut Connection) -> color_eyre::Result<()> {
         let mut stmt = conn.prepare("SELECT prefix, path, size, hash FROM files WHERE size > 0")?;
-        let mut  rows = stmt.query([])?;
+        let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let prefix = row.get_ref(0)?.as_str()?;
             let path = row.get_ref(1)?.as_str()?;

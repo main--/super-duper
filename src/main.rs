@@ -10,6 +10,7 @@ use tracing_subscriber::layer::SubscriberExt;
 
 mod index;
 mod dedup;
+mod cleanup;
 
 #[derive(FromArgs)]
 /// Find duplicated files and folders
@@ -27,6 +28,7 @@ enum ArgsCmd {
     Ls(ArgsLs),
     Dedup(ArgsDedup),
     Delta(ArgsDelta),
+    HardLink(ArgsHardlink),
 }
 
 #[derive(FromArgs)]
@@ -71,6 +73,15 @@ struct ArgsDelta {
     #[argh(switch)]
     /// left
     left: bool,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "hardlink")]
+/// Find most impactful duplications
+struct ArgsHardlink {
+    #[argh(positional)]
+    /// path
+    path: PathBuf,
 }
 
 
@@ -169,9 +180,6 @@ CREATE TABLE IF NOT EXISTS dirs(
             }
             let (pre1, path1) = find_prefix(&prefixes, &folder1).ok_or_eyre("folder1 prefix not found")?;
             let (pre2, path2) = find_prefix(&prefixes, &folder2).ok_or_eyre("folder2 prefix not found")?;
-            fn tostr(p: &Path) -> color_eyre::Result<&str> {
-                p.as_os_str().to_str().ok_or_eyre("non utf8 path")
-            }
 
             let mut stmt_exists = conn.prepare("SELECT COUNT(*) > 0 FROM dirs WHERE prefix = ? AND path = ?")?;
             let f1_exists: bool = stmt_exists.query_row([tostr(pre1)?, tostr(path1)?], |r| r.get(0))?;
@@ -182,6 +190,8 @@ CREATE TABLE IF NOT EXISTS dirs(
             if !f2_exists {
                 bail!("folder2 doesnt exist");
             }
+
+            //tracing::debug!(?pre1, ?path1, ?pre2, ?path2);
 
             let sql = r#"
             WITH files1 AS (
@@ -204,11 +214,18 @@ CREATE TABLE IF NOT EXISTS dirs(
                 false => sql.to_owned(),
             };
             let mut stmt = conn.prepare(&sql)?;
+            fn path2like(p: &Path) -> color_eyre::Result<String> {
+                if p.as_os_str().is_empty() {
+                    Ok(format!("%"))
+                } else {
+                    Ok(format!("{}/%", tostr(p)?.replace("_", "\\_").replace("%", "\\%")))
+                }
+            }
             let params = [
                 tostr(pre1)?,
-                &format!("{}/%", tostr(path1)?.replace("_", "\\_").replace("%", "\\%")),
+                &path2like(path1)?,
                 tostr(pre2)?,
-                &format!("{}/%", tostr(path2)?.replace("_", "\\_").replace("%", "\\%")),
+                &path2like(path2)?,
             ];
             let mut rows = stmt.query(params)?;
             while let Some(row) = rows.next()? {
@@ -225,8 +242,12 @@ CREATE TABLE IF NOT EXISTS dirs(
             }
         }
         ArgsCmd::Dedup(ArgsDedup {}) => dedup::dedup(&mut conn)?,
+        ArgsCmd::HardLink(ArgsHardlink { path }) => cleanup::hardlink(&mut conn, &path)?,
     }
 
     Ok(())
 }
 
+fn tostr(p: &Path) -> color_eyre::Result<&str> {
+    p.as_os_str().to_str().ok_or_eyre("non utf8 path")
+}
